@@ -1,0 +1,8 @@
+<html><body>
+<form method="POST" action="/login">
+Username: <input name="username"><br>
+Password: <input type="password" name="password"><br>
+<input type="submit" value="Login">
+</form>
+{{if .Error}}<div style='color:red'>{{.Error}}</div>{{end}}
+</body></html>
