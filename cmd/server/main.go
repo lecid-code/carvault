@@ -1,63 +1,81 @@
 package main
 
 import (
+	"flag"
 	"log"
+	"log/slog"
 	"net/http"
 	"os"
-	"strings"
 
+	"github.com/jmoiron/sqlx"
 	"github.com/lecid-code/carvault/internal/database"
 	"github.com/lecid-code/carvault/internal/handlers"
 )
 
-func main() {
-	// 1. Server port configurable via environment variable
-	port := os.Getenv("CARVAULT_PORT")
-	if port == "" {
-		port = "8080"
-	}
+type AppConfig struct {
+	Addr          string
+	DBDSN         string
+	SessionSecret string
+	TemplateDir   string
+}
 
-	// 2. Database DSN configurable via environment variable
-	dbDSN := os.Getenv("CARVAULT_DB_DSN")
-	if dbDSN == "" {
-		dbDSN = "carvault.db" // fallback, e.g. SQLite file
-	}
+type Application struct {
+	Config AppConfig
+	DB     *sqlx.DB
+	Logger *slog.Logger
+}
 
-	// 3. Log level configurable via environment variable
-	logLevel := strings.ToLower(os.Getenv("CARVAULT_LOG_LEVEL"))
-	if logLevel == "" {
-		logLevel = "info"
-	}
+func newApplication() Application {
+	addr := flag.String("addr", ":8080", "HTTP network address")
+	dbDSN := flag.String("db", "./data/carvault.db", "Database DSN")
+	sessionSecret := flag.String("session", "", "Session secret for authentication")
+	templateDir := flag.String("templates", "./templates", "Directory for HTML templates")
 
-	// 4. Session secret configurable via environment variable
-	sessionSecret := os.Getenv("CARVAULT_SESSION_SECRET")
-	if sessionSecret == "" {
-		log.Fatal("CARVAULT_SESSION_SECRET must be set")
-	}
+	flag.Parse()
 
-	// Example: log level usage (simple)
-	if logLevel == "debug" {
-		log.Printf("[DEBUG] Using DB DSN: %s", dbDSN)
+	// Validate required flags
+	if *sessionSecret == "" {
+		log.Fatal("Session secret must be provided. Use the -session flag.")
 	}
 
 	// Initialize DB
-	dbi, err := database.New(dbDSN)
+	dbi, err := database.New(*dbDSN)
 	if err != nil {
 		log.Fatalf("Failed to connect to DB: %v", err)
 	}
-	defer dbi.Close()
 	db := dbi.Conn()
+
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
+	return Application{
+		Config: AppConfig{
+			Addr:          *addr,
+			DBDSN:         *dbDSN,
+			SessionSecret: *sessionSecret,
+			TemplateDir:   *templateDir,
+		},
+
+		DB:     db,
+		Logger: logger,
+	}
+}
+
+// main function initializes the application and starts the server.
+func main() {
+	app := newApplication()
+	defer app.DB.Close()
 
 	// Auth handler
 	auth := &handlers.AuthHandler{
-		DB:            db,
-		SessionSecret: sessionSecret,
+		DB:            app.DB,
+		SessionSecret: app.Config.SessionSecret,
 	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("CarVault server is running."))
 	})
+
 	mux.HandleFunc("/login", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
@@ -68,11 +86,12 @@ func main() {
 			http.Error(w, "Method Not Allowed", http.StatusMethodNotAllowed)
 		}
 	})
+
 	mux.HandleFunc("/logout", auth.Logout)
 
-	log.Printf("Starting server on :%s...", port)
-	err = http.ListenAndServe(":"+port, mux)
+	app.Logger.Info("Starting server...", "address", app.Config.Addr)
+	err := http.ListenAndServe(app.Config.Addr, mux)
 	if err != nil {
-		log.Fatalf("Server failed: %v", err)
+		app.Logger.Error("Server failed", "error", err)
 	}
 }
